@@ -12,24 +12,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # --- ADD THIS STEP TO BRIDGE THE CLOUDFLARE TUNNEL ---
-      - name: Install Cloudflare Client & Configure SSH Proxy
+      - name: Install Cloudflare Client & Configure SSH
         run: |
+          # 1. Download and install cloudflared binary
           sudo mkdir -p /usr/local/bin
           sudo curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
           sudo chmod +x /usr/local/bin/cloudflared
+          
+          # 2. Create the SSH folder and config
           mkdir -p ~/.ssh
-          echo -e "Host *\n  ProxyCommand /usr/local/bin/cloudflared access ssh --hostname %h" >> ~/.ssh/config
+          chmod 700 ~/.ssh
+          echo -e "Host act-bot.comonhq.com\n  ProxyCommand /usr/local/bin/cloudflared access ssh --hostname %h\n  StrictHostKeyChecking no" >> ~/.ssh/config
+          
+          # 3. Load the private SSH key into the runner
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
 
-      - name: Deploy to Homelab
-        uses: appleboy/ssh-action@v1.2.1
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USER }}
-          key: ${{ secrets.SSH_KEY }}
-          command_timeout: "20m"
-          script: |
-            APP_DIR="/home/${{ secrets.USER }}/ACT"
+      - name: Deploy to Homelab via Native SSH
+        run: |
+          ssh -i ~/.ssh/id_ed25519 ambratolm@act-bot.comonhq.com << 'EOF'
+            APP_DIR="/home/ambratolm/ACT"
             REPO_URL="https://github.com/Comon-tech/ACT.git"
             REMOTE="origin"
             BRANCH="main"
@@ -61,3 +63,4 @@ jobs:
             sudo systemctl restart act-bot.service
             sleep 3
             sudo systemctl status act-bot.service --no-pager
+          EOF
