@@ -14,24 +14,22 @@ jobs:
 
       - name: Install Cloudflare Client & Configure SSH
         run: |
-          # 1. Download and install cloudflared binary
           sudo mkdir -p /usr/local/bin
           sudo curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
           sudo chmod +x /usr/local/bin/cloudflared
           
-          # 2. Create the SSH folder and config
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
           echo -e "Host act-bot.comonhq.com\n  ProxyCommand /usr/local/bin/cloudflared access ssh --hostname %h\n  StrictHostKeyChecking no" >> ~/.ssh/config
           
-          # 3. Load the private SSH key into the runner
           echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
 
+      # --- RUNNING AS ROOT ---
       - name: Deploy to Homelab via Native SSH
         run: |
-          ssh -i ~/.ssh/id_ed25519 ambratolm@act-bot.comonhq.com << 'EOF'
-            APP_DIR="/home/ambratolm/ACT"
+          ssh -i ~/.ssh/id_ed25519 root@act-bot.comonhq.com << 'EOF'
+            APP_DIR="/root/ACT"
             REPO_URL="https://github.com/Comon-tech/ACT.git"
             REMOTE="origin"
             BRANCH="main"
@@ -57,10 +55,10 @@ jobs:
             fi
 
             echo "Syncing dependencies with uv..."
-            ~/.local/bin/uv sync
+            /root/.local/bin/uv sync
 
             echo "Restarting service..."
-            sudo systemctl restart act-bot.service
+            systemctl restart act-bot.service
             sleep 3
-            sudo systemctl status act-bot.service --no-pager
+            systemctl status act-bot.service --no-pager
           EOF
