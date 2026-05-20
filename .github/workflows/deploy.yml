@@ -1,53 +1,64 @@
-# name: Deploy to EC2
+name: Deploy to Homelab
 
-# on:
-#   push:
-#     branches:
-#       - main
+on:
+  push:
+    branches:
+      - main
 
-# jobs:
-#   deploy:
-    
-#     runs-on: ubuntu-latest
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-#     steps:
-#       - name: Checkout repository
-#         uses: actions/checkout@v4
+      - name: Install Cloudflare Client & Configure SSH
+        run: |
+          sudo mkdir -p /usr/local/bin
+          sudo curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
+          sudo chmod +x /usr/local/bin/cloudflared
+          
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo -e "Host act-bot.comonhq.com\n  ProxyCommand /usr/local/bin/cloudflared access ssh --hostname %h\n  StrictHostKeyChecking no" >> ~/.ssh/config
+          
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
 
-#       - name: Deploy to EC2
-#         uses: appleboy/ssh-action@v1.2.1
-#         with:
-#           host: ${{ secrets.EC2_HOST }}
-#           username: ${{ secrets.EC2_USER }}
-#           key: ${{ secrets.EC2_SSH_KEY }}
-#           command_timeout: "20m"
-#           script: |
-#             APP_DIR="/home/ubuntu/ACT"
-#             REPO_URL="https://github.com/Comon-tech/ACT.git"
-#             REMOTE="fork"
-#             BRANCH="main"
+      # --- RUNNING AS ROOT ---
+      - name: Deploy to Homelab via Native SSH
+        run: |
+          ssh -i ~/.ssh/id_ed25519 root@act-bot.comonhq.com << 'EOF'
+            APP_DIR="/root/ACT"
+            REPO_URL="https://github.com/Comon-tech/ACT.git"
+            REMOTE="origin"
+            BRANCH="main"
 
-#             if [ ! -d "$APP_DIR" ]; then
-#               echo "Directory $APP_DIR does not exist. Creating and cloning..."
-#               mkdir -p "$APP_DIR"
-#               cd "$APP_DIR"
-#               git clone --depth 1 "$REPO_URL" .
-#               git checkout "$BRANCH"
-#             else
-#               cd "$APP_DIR"
-#               if [ ! -d ".git" ]; then
-#                 echo "No git repo found, Re-cloning..."
-#                 rm -rf *
-#                 git clone --depth 1 "$REPO_URL" .
-#                 git checkout "$BRANCH"
-#               else
-#                 echo "Fetching and resetting..."
-#                 git fetch "$REMOTE" "$BRANCH"
-#                 git reset --hard "$REMOTE"/"$BRANCH"
-#               fi
-#             fi
+            if [ ! -d "$APP_DIR" ]; then
+              echo "Directory $APP_DIR does not exist. Creating and cloning..."
+              mkdir -p "$APP_DIR"
+              cd "$APP_DIR"
+              git clone --depth 1 "$REPO_URL" .
+              git checkout "$BRANCH"
+            else
+              cd "$APP_DIR"
+              if [ ! -d ".git" ]; then
+                echo "No git repo found, Re-cloning..."
+                rm -rf *
+                git clone --depth 1 "$REPO_URL" .
+                git checkout "$BRANCH"
+              else
+                echo "Fetching and resetting..."
+                git fetch "$REMOTE" "$BRANCH"
+                git reset --hard "$REMOTE"/"$BRANCH"
+              fi
+            fi
 
-#             echo "Restarting service..."
-#             sudo systemctl restart act-app.service
-#             sleep 3
-#             sudo systemctl status act-app.service --no-pager
+            echo "Syncing dependencies with uv..."
+            /root/.local/bin/uv sync
+
+            echo "Restarting service..."
+            systemctl restart act-bot.service
+            sleep 3
+            systemctl status act-bot.service --no-pager
+          EOF
