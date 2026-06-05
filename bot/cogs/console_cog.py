@@ -1,7 +1,11 @@
 from discord import (
     Attachment,
+    Forbidden,
     Interaction,
     Member,
+    NotFound,
+    Object,
+    Role,
     TextChannel,
     Thread,
     User,
@@ -266,3 +270,79 @@ class ConsoleCog(Cog, description="Provide control and management interface"):
             await interaction.followup.send(
                 embed=EmbedX.error(f"Failed to purge messages: {e}"), ephemeral=True
             )
+
+    #----------------------------------------------------------------------------------------------------
+    # * Ban
+    #----------------------------------------------------------------------------------------------------
+    @app_commands.command(name="ban", description="Bans a member from the server.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def ban(self, interaction: Interaction, member: Member, reason: str = "No reason provided"):
+        """Standard ban command."""
+        try:
+            await member.ban(reason=reason)
+            await interaction.response.send_message(f"🔨 **{member}** has been banned.", ephemeral=True)
+        except Forbidden:
+            await interaction.response.send_message("❌ I do not have permission to ban this member. (Check role hierarchy)", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ An error occurred: {e}", ephemeral=True)
+
+    #----------------------------------------------------------------------------------------------------
+    # * Unban
+    #----------------------------------------------------------------------------------------------------
+    @app_commands.command(name="unban", description="Unbans a user cleanly via their User ID.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def unban(self, list_interaction: Interaction, user_id: str):
+        """
+        We use discord.Object(id) so the bot doesn't require the user to be in the server.
+        """
+        try:
+            target_id = int(user_id)
+            user_obj = Object(id=target_id)
+            await list_interaction.guild.unban(user_obj)
+            await list_interaction.response.send_message(f"✅ User ID `{user_id}` has been silently unbanned.", ephemeral=True)
+            
+        except ValueError:
+            await list_interaction.response.send_message("❌ Please provide a valid numerical User ID.", ephemeral=True)
+        except NotFound:
+            await list_interaction.response.send_message("❌ That user is not currently banned on this server.", ephemeral=True)
+        except Forbidden:
+            await list_interaction.response.send_message("❌ I lack the 'Ban Members' permission to do that.", ephemeral=True)
+
+    # Error handling for missing permissions
+    @ban.error
+    @unban.error
+    async def mod_error(self, interaction: Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.errors.MissingPermissions):
+            await interaction.response.send_message("⛔ You don't have permission to use this command.", ephemeral=True)
+
+    #----------------------------------------------------------------------------------------------------
+    # * Role
+    #----------------------------------------------------------------------------------------------------
+    @app_commands.command(name="role", description="Gives a role to a user.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def role(self, interaction: Interaction, member: Member, role: Role):
+        try:
+            # Check if the role you are trying to give is higher than the bot's highest role
+            if role.position >= interaction.guild.me.top_role.position:
+                await interaction.response.send_message(
+                    "❌ I cannot assign this role. Move my bot role higher in the server settings hierarchy!", 
+                    ephemeral=True
+                )
+                return
+
+            await member.add_roles(role)
+            await interaction.response.send_message(
+                f"✅ Successfully gave the role **{role.name}** to **{member.display_name}**.", 
+                ephemeral=True
+            )
+
+        except Forbidden:
+            await interaction.response.send_message("❌ I lack the 'Manage Roles' permission on this server.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ An error occurred: {e}", ephemeral=True)
+
+    # Attach the permission error handler for the role command
+    @role.error
+    async def role_error(self, interaction: Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.errors.MissingPermissions):
+            await interaction.response.send_message("⛔ You need 'Manage Roles' permissions to use this command.", ephemeral=True)
