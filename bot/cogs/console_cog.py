@@ -1,8 +1,10 @@
 from discord import (
     Attachment,
     Forbidden,
+    HTTPException,
     Interaction,
     Member,
+    Message,
     NotFound,
     Object,
     Role,
@@ -204,11 +206,13 @@ class ConsoleCog(Cog, description="Provide control and management interface"):
     @app_commands.default_permissions(administrator=True)
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.command(
-        description="Purge messages in current channel", extras={"category": "Console"}
+        description="Purge messages in current channel with advanced filters", extras={"category": "Console"}
     )
     @app_commands.describe(
-        limit="Maximum number of messages to purge (default: 1)",
+        limit="Number of targeted messages to delete (default: 1)",
         member="Only purge messages from this member (optional)",
+        role="Only purge messages from members with this role (optional)",
+        message_id="Target a single specific message ID to delete (optional)",
         before="Purge messages before this message ID (optional)",
         after="Purge messages after this message ID (optional)",
     )
@@ -217,11 +221,13 @@ class ConsoleCog(Cog, description="Provide control and management interface"):
         interaction: Interaction,
         limit: int = 1,
         member: Member | User | None = None,
+        role: Role | None = None,
+        message_id: str | None = None,
         before: str | None = None,
         after: str | None = None,
     ):
         """
-        Purge messages in the current channel with better handling of before/after fields.
+        Purge messages in the current channel with dynamic criteria scanning.
         """
         try:
             await interaction.response.defer(ephemeral=True)
@@ -239,30 +245,75 @@ class ConsoleCog(Cog, description="Provide control and management interface"):
                     ephemeral=True,
                 )
 
-            # Convert before and after to discord.Message objects if provided
+            # Convert before, after, and target message IDs to integers/objects if provided
             before_msg = None
             after_msg = None
+            target_msg_id = None
+            
             try:
                 if before:
                     before_msg = await channel.fetch_message(int(before))
                 if after:
                     after_msg = await channel.fetch_message(int(after))
+                if message_id:
+                    target_msg_id = int(message_id)
             except Exception as e:
                 return await interaction.followup.send(
                     embed=EmbedX.error(f"Invalid message ID provided: {e}"),
                     ephemeral=True,
                 )
 
-            # Purge messages
+            # Keep track of how many matching messages we've actually approved for deletion
+            deleted_count = 0
+
+            def purge_check(msg: Message) -> bool:
+                nonlocal deleted_count
+                
+                # If we already approved the requested number of deletions, stop matching
+                if deleted_count >= limit:
+                    return False
+
+                # Filter by exact Message ID
+                if target_msg_id and msg.id != target_msg_id:
+                    return False
+
+                # Filter by Member
+                if member and msg.author.id != member.id:
+                    return False
+
+                # Filter by Role (Checks if author is a Member and has the role)
+                if role:
+                    if not isinstance(msg.author, Member) or role not in msg.author.roles:
+                        return False
+
+                # If it passed all filters, it's a match! Increment our target counter.
+                deleted_count += 1
+                return True
+
+            # Set an upper search ceiling. If looking for a specific message ID, 
+            # or a rare user, we might need to sweep through hundreds of records.
+            # 1000 is usually a safe maximum history sweep boundary per command call.
+            search_history_limit = 1000 if (member or role or target_msg_id) else limit
+
+            # Run the purge with our flexible criteria checklist
             deleted = await channel.purge(
-                limit=limit,
-                check=(lambda msg: msg.author == member) if member else MISSING,
+                limit=search_history_limit,
+                check=purge_check,
                 before=before_msg,
                 after=after_msg,
             )
+
+            # Construct a dynamic success message based on used parameters
+            filter_details = []
+            if member: filter_details.append(f"by {member.mention}")
+            if role: filter_details.append(f"from roles matching {role.name}")
+            if target_msg_id: filter_details.append(f"with ID `{target_msg_id}`")
+            
+            suffix = f" matching {" and ".join(filter_details)}" if filter_details else ""
+
             await interaction.followup.send(
                 embed=EmbedX.success(
-                    f"Purged {len(deleted)} message(s){f" by {member.mention}" if member else ""}."
+                    f"Successfully purged {len(deleted)} message(s){suffix}."
                 ),
                 ephemeral=True,
             )
@@ -346,3 +397,109 @@ class ConsoleCog(Cog, description="Provide control and management interface"):
     async def role_error(self, interaction: Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.errors.MissingPermissions):
             await interaction.response.send_message("⛔ You need 'Manage Roles' permissions to use this command.", ephemeral=True)
+
+    
+    #----------------------------------------------------------------------------------------------------
+    # * Server
+    #----------------------------------------------------------------------------------------------------
+    @app_commands.command(
+        name="server", 
+        description="View or update server configuration settings."
+    )
+    @app_commands.describe(
+        name="Change the server's name",
+        icon="Upload a new server icon (Image file)",
+        description="Change the server's description (for public/discoverable servers)",
+        private_profile="Set if the server profile is private (True/False)"
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def server_cmd(
+        self, 
+        interaction: Interaction, 
+        name: str|None = None,
+        icon: Attachment|None = None,
+        description: str|None = None,
+        private_profile: bool|None = None
+    ):
+        guild = interaction.guild
+        
+        # Guard clause if used outside a server (DM)
+        if not guild:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+
+        # 1. IF NO ARGUMENTS PASSED: Return current server info
+        if name is None and icon is None and description is None and private_profile is None:
+            embed = EmbedX.info(
+                title=f"Server Info", 
+            )
+            if guild.icon:
+                embed.set_thumbnail(url=guild.icon.url)
+                
+            embed.add_field(name="ID", value=guild.id, inline=True)
+            embed.add_field(name="Name", value=guild.name, inline=False)
+            embed.add_field(name="Owner", value=guild.owner, inline=True)
+            embed.add_field(name="Members", value=guild.member_count, inline=True)
+            embed.add_field(name="Description", value=guild.description or "(No description)", inline=False)
+            
+            # Discord doesn't natively have a "private profile" boolean for guilds, 
+            # but we can check features like 'DISCOVERABLE' or display custom state.
+            is_discoverable = "DISCOVERABLE" in guild.features
+            embed.add_field(name="Publicly Discoverable?", value="Yes" if is_discoverable else "No", inline=True)
+
+            await interaction.response.send_message(embed=embed)
+            return
+
+        # 2. IF ARGUMENTS PASSED: Update the server settings
+        await interaction.response.defer(ephemeral=True) # Defer since API calls take time
+        changes = []
+
+        try:
+            # Update Name
+            if name is not None:
+                await guild.edit(name=name)
+                changes.append(f"• **Name** updated to: `{name}`")
+
+            # Update Description
+            if description is not None:
+                await guild.edit(description=description)
+                changes.append(f"• **Description** updated to: `{description}`")
+
+            # Update Icon
+            if icon is not None:
+                if icon.content_type and icon.content_type.startswith("image/"):
+                    icon_bytes = await icon.read()
+                    await guild.edit(icon=icon_bytes)
+                    changes.append("• **Server Icon** updated successfully.")
+                else:
+                    await interaction.followup.send("❌ Provided file for the icon must be an image.", ephemeral=True)
+                    return
+
+            # Update Private Profile 
+            # Note: Native discord servers don't have a "private_profile" toggle. 
+            # This toggle changes community discovery features if the server qualifies.
+            if private_profile is not None:
+                if private_profile:
+                    if "DISCOVERABLE" in guild.features:
+                        await guild.remove_features("DISCOVERABLE")
+                    changes.append("• **Private Profile**: Enabled (Removed from public discovery if applicable).")
+                else:
+                    # Enabling discoverability usually requires meeting explicit Discord requirements,
+                    # but we attempt to add it here.
+                    try:
+                        await guild.add_features("DISCOVERABLE")
+                        changes.append("• **Private Profile**: Disabled (Added to public discovery).")
+                    except HTTPException:
+                        changes.append("• **Private Profile**: Failed to disable. (Server may not meet Discord's community discovery requirements).")
+
+            # Send success confirmation
+            result_embed = EmbedX.success(
+                title="Server Settings Updated",
+                description="\n".join(changes),
+            )
+            await interaction.followup.send(embed=result_embed, ephemeral=True)
+
+        except Forbidden:
+            await interaction.followup.send("❌ I do not have the required permissions (`Manage Server`) to change these settings.", ephemeral=True)
+        except HTTPException as e:
+            await interaction.followup.send(f"❌ An error occurred while updating settings: {e}", ephemeral=True)
